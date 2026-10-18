@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { closeMobileWorkView, pushMobileWorkView, useMobileWorkView } from './mobileWorkView'
 
 afterEach(() => {
-  closeMobileWorkView()
+  act(() => closeMobileWorkView())
 })
 
 describe('mobileWorkView 单例', () => {
@@ -24,6 +24,17 @@ describe('mobileWorkView 单例', () => {
       closeMobileWorkView()
     })
     expect(result.current).toBeNull()
+  })
+
+  it('preserves file source identity when replacing a same-path mobile view', () => {
+    const { result } = renderHook(() => useMobileWorkView())
+    const first = { kind: 'file' as const, title: 'a.go', filePath: '/repo/a.go', sourceChannel: 'web', sourceChatID: 'first' }
+    act(() => pushMobileWorkView(first))
+    expect(result.current).toEqual(first)
+    const second = { ...first, sourceChannel: 'cli', sourceChatID: 'second' }
+    act(() => pushMobileWorkView(second))
+    expect(result.current).toEqual(second)
+    expect(first.sourceChatID).toBe('first')
   })
 
   it('插件视图（openViewTab 的手机端路由）携带 viewId/viewKey/viewParams', () => {

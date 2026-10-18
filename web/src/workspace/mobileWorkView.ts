@@ -17,6 +17,8 @@ export type MobileWorkView =
       kind: 'file'
       title: string
       filePath: string
+      sourceChannel?: string
+      sourceChatID?: string
       editorId?: string
       initialLine?: number
       initialHighlight?: { startLine: number; endLine?: number }

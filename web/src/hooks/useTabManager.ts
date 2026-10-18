@@ -10,7 +10,7 @@
  *   - Agent tabs are not closable (closeTab is a no-op for them; the custom
  *     TabHeader also suppresses the close button for `closable=false`).
  *   - At least one Agent tab stays open.
- *   - Work tabs open in a reusable right-side group, VSCode-style.
+ *   - Default tabs preserve the active group; explicit side-file opens reuse a right group.
  *
  * Why derive state from dockview rather than own it: dockview already tracks
  * panel add/remove/active transitions, drag-split, and popouts. Owning a
@@ -48,6 +48,8 @@ function panelToTab(panel: IDockviewPanel): Tab | null {
       params.type === 'file'
           ? {
               filePath: params.filePath,
+              sourceChannel: params.sourceChannel,
+              sourceChatID: params.sourceChatID,
               editorId: params.editorId,
               initialLine: params.initialLine,
               initialHighlight: params.initialHighlight,
@@ -98,8 +100,8 @@ function panelToTab(panel: IDockviewPanel): Tab | null {
 export interface TabManager {
   tabs: Tab[]
   activeTabId: string | null
-  /** Open or focus a tab by logical key; returns the tab id. */
-  openTab: (tab: Omit<Tab, 'id'>) => string
+  /** Open/focus by logical key. Only explicit file position:'right' changes groups; default and plugin opens preserve layout. */
+  openTab: (tab: Omit<Tab, 'id'>, options?: { position: 'right' }) => string
   /** Close a tab (agent tabs protected). */
   closeTab: (id: string) => void
   /** Same-group tabs in tab-bar order (tab 右键菜单 disable 态计算用)。 */
@@ -126,9 +128,9 @@ function useTabManagerImpl(): TabManager {
   const apiRef = useRef<DockviewApi | null>(null)
   // logical tabId → dockview panel id
   const panelIdByTab = useRef<Map<string, string>>(new Map())
-  const rightGroupPanelIdRef = useRef<string | null>(null)
+  const rightGroupIdRef = useRef<string | null>(null)
   // pending tabs queued before the API is bound (so openTab before ready works)
-  const pending = useRef<Omit<Tab, 'id'>[]>([])
+  const pending = useRef<Array<{ input: Omit<Tab, 'id'>; options?: { position: 'right' } }>>([])
 
   const [tabs, setTabs] = useState<Tab[]>([])
   const [activeTabId, setActiveTabId] = useState<string | null>(null)
@@ -143,22 +145,15 @@ function useTabManagerImpl(): TabManager {
       if (params?.tabId) nextPanelMap.set(params.tabId, panel.id)
     }
     panelIdByTab.current = nextPanelMap
-    if (rightGroupPanelIdRef.current && !api.getPanel(rightGroupPanelIdRef.current)) {
-      rightGroupPanelIdRef.current = null
-    }
-    if (!rightGroupPanelIdRef.current) {
-      const workPanel = api.panels.find((panel) => {
-        const params = panel.params as PanelParams | undefined
-        return params?.closable === true
-      })
-      rightGroupPanelIdRef.current = workPanel?.id ?? null
+    if (rightGroupIdRef.current && !api.panels.some((panel) => panel.group.id === rightGroupIdRef.current)) {
+      rightGroupIdRef.current = null
     }
     setTabs(nextTabs)
     const active = api.activePanel ? (api.activePanel.params as PanelParams).tabId : null
     setActiveTabId(active)
   }, [])
 
-  const openTabInternalRef = useRef<(input: Omit<Tab, 'id'>) => string>(() => '')
+  const openTabInternalRef = useRef<TabManager['openTab']>(() => '')
 
   const bindApi = useCallback(
     (api: DockviewApi | null) => {
@@ -171,7 +166,7 @@ function useTabManagerImpl(): TabManager {
       resync()
       const queued = pending.current
       pending.current = []
-      queued.forEach((t) => openTabInternalRef.current(t))
+      queued.forEach(({ input, options }) => openTabInternalRef.current(input, options))
       // Cleanup is owned by the container's effect; store disposers on the api ref.
       ;(apiRef as unknown as { _dispose?: () => void })._dispose = () => {
         offAdd.dispose()
@@ -182,12 +177,19 @@ function useTabManagerImpl(): TabManager {
     [resync],
   )
 
-  const openTab = useCallback((input: Omit<Tab, 'id'>): string => {
+  const openTab = useCallback((input: Omit<Tab, 'id'>, options?: { position: 'right' }): string => {
     const api = apiRef.current
     if (!api) {
-      pending.current.push(input)
+      pending.current.push({ input, options })
       return ''
     }
+    // Only explicit file opens change layout. Never infer a work group from an
+    // arbitrary closable panel: it may be a sibling of chat and hide the chat.
+    const sideFile = input.type === 'file' && options?.position === 'right'
+    const chat = api.panels.find((p) => p.params?.type === 'agent' && p.group === api.activePanel?.group)
+      ?? api.panels.find((p) => p.params?.type === 'agent')
+    const remembered = rightGroupIdRef.current ? api.panels.find((panel) => panel.group.id === rightGroupIdRef.current) : undefined
+    const rightPanel = remembered && remembered.group !== chat?.group ? remembered : undefined
     const key = tabLogicalKey(input)
     // Focus an existing tab with the same logical key instead of duplicating.
     if (key) {
@@ -195,6 +197,15 @@ function useTabManagerImpl(): TabManager {
         const panel = api.getPanel(panelId)
         const params = panel?.params as PanelParams | undefined
         if (params && tabLogicalKeyFromParams(params) === key) {
+          if (sideFile && panel) {
+            if (rightPanel && panel.group !== rightPanel.group) {
+              panel.api.moveTo({ group: rightPanel.group, position: 'center' })
+            } else if (!rightPanel && chat) {
+              // Existing left/bottom splits must also become explicitly right.
+              panel.api.moveTo({ group: chat.group, position: 'right' })
+            }
+            rightGroupIdRef.current = panel.group.id
+          }
           panel?.api.setActive()
           return tabId
         }
@@ -235,6 +246,8 @@ function useTabManagerImpl(): TabManager {
       sessionId: input.type === 'agent' ? input.data?.filePath : undefined,
       channel: input.type === 'agent' ? input.data?.channel : undefined,
       filePath: input.type === 'file' ? input.data?.filePath : undefined,
+      sourceChannel: input.type === 'file' ? input.data?.sourceChannel : undefined,
+      sourceChatID: input.type === 'file' ? input.data?.sourceChatID : undefined,
       terminalId: input.type === 'terminal' ? input.data?.terminalId : undefined,
       closable: input.closable,
       subAgentRole: input.type === 'agent' ? input.data?.subAgentRole : undefined,
@@ -262,8 +275,8 @@ function useTabManagerImpl(): TabManager {
       fileViewMode: input.type === 'file' ? input.data?.fileViewMode : undefined,
       panelId: input.type === 'panel' ? input.data?.panelId : undefined,
     }
-    // File/work tabs open in the same group as Agent, as a sibling tab
-    // (not a separate right-side column). Agent panels use renderer 'always'
+    // Default work tabs remain siblings in the active group. Explicit file
+    // side opens instead create/reuse the right group. Agent uses 'always'
     // to keep their virtual list (MessageList) mounted in the DOM — otherwise
     // dockview detaches the content when inactive, collapsing the virtualizer's
     // scroll element to 0 height and rendering 0 messages. Other panels (file,
@@ -279,8 +292,9 @@ function useTabManagerImpl(): TabManager {
     // ⇒ **新建 group（分屏）**！那一刻旧面板所在 group 被压成窄条，其 MessageInput
     // 就被挤到面板上半部分 —— 用户看到的「切换会话一闪而过、消息区上方浮着一排
     // 输入框控件（回形针/Clock/Stop）」正是这一帧（帧级 E2E 曾抓到 groups 短暂 >1）。
-    // 契约：**开 tab 永不改变布局**（所有 tab 都是同组兄弟）。
-    const referencePanel = api.activePanel ?? api.panels[api.panels.length - 1] ?? null
+    // 默认开 tab 永不改变布局；只有显式 side-file 请求创建/复用右侧分栏。
+    const referencePanel = (sideFile ? rightPanel ?? chat : undefined) ?? api.activePanel ?? api.panels[api.panels.length - 1] ?? null
+    const direction = sideFile && !rightPanel && chat ? 'right' as const : 'within' as const
     api.addPanel({
       id: panelId,
       title: input.title,
@@ -288,10 +302,11 @@ function useTabManagerImpl(): TabManager {
       params,
       renderer: input.type === 'agent' ? 'always' : 'onlyWhenVisible',
       ...(referencePanel
-        ? { position: { referencePanel: referencePanel.id, direction: 'within' as const } }
+        ? { position: { referencePanel: referencePanel.id, direction } }
         : {}),
     })
     panelIdByTab.current.set(tabId, panelId)
+    if (sideFile) rightGroupIdRef.current = api.getPanel(panelId)?.group.id ?? null
     const panel = api.getPanel(panelId)
     if (panel) {
       panel.api.setActive()
@@ -315,9 +330,9 @@ function useTabManagerImpl(): TabManager {
       const agentCount = api.panels.filter((p) => (p.params as PanelParams).type === 'agent').length
       if (agentCount <= 1) return
     }
+    // FilePanel may cancel close for an unsaved draft. Only the actual
+    // onDidRemovePanel resync may remove this panel from the logical index.
     panel.api.close()
-    panelIdByTab.current.delete(id)
-    if (rightGroupPanelIdRef.current === panelId) rightGroupPanelIdRef.current = null
   }, [])
 
   /** Same-group tabs in tab-bar order（右键菜单 disable 态计算用）。 */
@@ -357,11 +372,11 @@ function useTabManagerImpl(): TabManager {
     if (!api || !panel) return
     // Move the panel into a brand-new group to the right of its current group.
     panel.api.moveTo({ group: panel.group, position: 'right' })
-    rightGroupPanelIdRef.current = panelId ?? null
+    rightGroupIdRef.current = panel.group.id
   }, [])
 
   const resetWorkGroup = useCallback(() => {
-    rightGroupPanelIdRef.current = null
+    rightGroupIdRef.current = null
   }, [])
 
   const getLayoutJSON = useCallback(() => apiRef.current?.toJSON() ?? null, [])
@@ -381,7 +396,7 @@ function useTabManagerImpl(): TabManager {
       const disposer = (apiRef as unknown as { _dispose?: () => void })._dispose
       disposer?.()
       panelIdByTab.current.clear()
-      rightGroupPanelIdRef.current = null
+      rightGroupIdRef.current = null
     }
   }, [])
 
@@ -405,8 +420,15 @@ function useTabManagerImpl(): TabManager {
   )
 }
 
+function fileLogicalKey(data?: { filePath?: string; sourceChannel?: string; sourceChatID?: string }): string {
+  if (!data?.filePath) return ''
+  // Preserve legacy/plugin identity exactly when no target was explicitly bound.
+  if (data.sourceChannel === undefined && data.sourceChatID === undefined) return `file:${data.filePath}`
+  return `file-source:${JSON.stringify([data.sourceChannel ?? null, data.sourceChatID ?? null, data.filePath])}`
+}
+
 export function tabLogicalKey(input: Pick<Tab, 'type' | 'data'>): string {
-  if (input.type === 'file' && input.data?.filePath) return `file:${input.data.filePath}`
+  if (input.type === 'file') return fileLogicalKey(input.data)
   // SubAgent tabs key on parentChatID + role + instance.
   if (input.type === 'agent' && input.data?.subAgentRole) {
     return input.data.agentChatID
@@ -429,7 +451,7 @@ export function tabLogicalKey(input: Pick<Tab, 'type' | 'data'>): string {
 }
 
 export function tabLogicalKeyFromParams(p: PanelParams): string {
-  if (p.type === 'file') return p.filePath ? `file:${p.filePath}` : ''
+  if (p.type === 'file') return fileLogicalKey(p)
   if (p.type === 'agent' && p.subAgentRole) {
     return p.agentChatID
       ? `agent-history:${p.agentChatID}`

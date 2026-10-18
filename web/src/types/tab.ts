@@ -7,7 +7,13 @@
  */
 import type { TabType } from './shared'
 
-export interface PanelParams {
+/** File execution target captured when opening, never derived from later focus. */
+export interface FileSourceParams {
+  sourceChannel?: string
+  sourceChatID?: string
+}
+
+export interface PanelParams extends FileSourceParams {
   tabId: string
   type: TabType
   title: string

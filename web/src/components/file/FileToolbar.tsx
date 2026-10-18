@@ -23,9 +23,15 @@ export interface FileToolbarProps {
   onModeChange?: (mode: FileViewMode) => void
   /** Whether to offer the toggle at all (false for images). */
   canToggle: boolean
+  dirty?: boolean
+  saving?: boolean
+  readOnly?: boolean
+  saveError?: string | null
+  onSave?: () => void
+  onReload?: () => void
 }
 
-export function FileToolbar({ fileName, mode, onModeChange, canToggle }: FileToolbarProps) {
+export function FileToolbar({ fileName, mode, onModeChange, canToggle, dirty, saving, readOnly, saveError, onSave, onReload }: FileToolbarProps) {
   const { t } = useI18n()
 
   return (
@@ -35,6 +41,12 @@ export function FileToolbar({ fileName, mode, onModeChange, canToggle }: FileToo
         {fileName}
       </span>
 
+      {onSave && <>
+        <span role="status" className="text-xs text-text-secondary">{t(readOnly ? 'file.readOnly' : saving ? 'file.saving' : dirty ? 'file.unsaved' : 'file.saved')}</span>
+        <button type="button" className="rounded px-2 py-1 text-xs disabled:opacity-50" disabled={readOnly || saving || !dirty} onClick={onSave}>{t('file.save')}</button>
+      </>}
+      {onReload && <button type="button" disabled={saving} className="rounded px-2 py-1 text-xs disabled:opacity-50" onClick={onReload}>{t('file.reload')}</button>}
+      {saveError && <span role="alert" className="truncate text-xs text-red-500" title={saveError}>{saveError}</span>}
       {canToggle && onModeChange && (
         <div className="ml-auto flex items-center gap-1">
           <ModeButton

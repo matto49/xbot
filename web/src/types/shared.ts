@@ -21,6 +21,9 @@ export interface Tab {
 }
 
 export interface TabData {
+  /** File execution target captured when opening, independent of later focus. */
+  sourceChannel?: string
+  sourceChatID?: string
   /** 布局 v2：侧栏「面板」区打开的 dockview 面板 id（files/search/info/tasks/terminal）。 */
   panelId?: string
   filePath?: string

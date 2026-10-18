@@ -12,6 +12,8 @@ import { ChevronRight, ChevronDown, FolderOpen, FolderUp, Loader2, RotateCcw, Se
 
 import { useI18n } from '@/providers/i18n'
 import { useCwd } from '@/providers/CwdProvider'
+import { useSessionStore } from '@/hooks/useSessionStore'
+import { parentSessionForFocusedAgent } from './session-scope'
 import { useFileTree } from '@/hooks/useFileTree'
 import { insertIntoChat } from '@/lib/chatInputBridge'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -22,7 +24,7 @@ import {
 } from '@/components/ui/context-menu'
 import { TouchContextMenuTrigger } from '@/components/ui/TouchContextMenuTrigger'
 import { toast } from 'sonner'
-import { statFile, parentPath, invalidateFsCache } from '@/hooks/useFileSystem'
+import { statFile, parentPath, joinPath, invalidateFsCache } from '@/hooks/useFileSystem'
 import type { TabManager } from '@/hooks/useTabManager'
 import type { FileNode } from '@/types/file'
 import { FileNodeIcon } from './FileNodeIcon'
@@ -33,6 +35,10 @@ interface FileExplorerProps {
 
 export function FileExplorer({ tabManager }: FileExplorerProps) {
   const { t } = useI18n()
+  const session = useSessionStore()
+  const sourceSession = parentSessionForFocusedAgent(tabManager, session.activeSession)
+  const sourceChannel = sourceSession?.channel
+  const sourceChatID = sourceSession?.chatID
   const { cwd } = useCwd()
   // browseRoot: null means "follow session CWD". Non-null means user navigated
   // to a custom path via the path bar.
@@ -65,21 +71,24 @@ export function FileExplorer({ tabManager }: FileExplorerProps) {
   }, [expandDir])
 
   const openFile = useCallback(
-    (node: FileNode) => {
+    (node: FileNode, placement: 'right' | 'default' = 'right') => {
       tabManager.openTab({
         type: 'file',
         title: node.name,
         icon: 'file',
         closable: true,
-        data: { filePath: node.path, language: node.language },
-      })
+        data: { filePath: node.path, fileLanguage: node.language, sourceChannel, sourceChatID },
+      }, placement === 'right' ? { position: 'right' } : undefined)
     },
-    [tabManager],
+    [tabManager, sourceChannel, sourceChatID],
   )
 
   const handleNavigate = useCallback(async (path: string) => {
-    const trimmed = path.trim()
-    if (!trimmed) return
+    const value = path.trim()
+    if (!value) return
+    const trimmed = value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value)
+      ? value
+      : joinPath(browseRoot ?? cwd ?? '', value)
     try {
       const stat = await statFile(trimmed)
       if (stat.isDir) {
@@ -96,13 +105,13 @@ export function FileExplorer({ tabManager }: FileExplorerProps) {
           title: stat.name,
           icon: 'file',
           closable: true,
-          data: { filePath: trimmed },
-        })
+          data: { filePath: trimmed, sourceChannel, sourceChatID },
+        }, { position: 'right' })
       }
     } catch {
       toast.error(t('sidebar.pathNotFound'))
     }
-  }, [t, tabManager])
+  }, [t, tabManager, browseRoot, cwd, sourceChannel, sourceChatID])
 
   const handleReset = useCallback(() => {
     invalidateFsCache()
@@ -325,7 +334,7 @@ interface FileTreeNodeProps {
   depth: number
   expanded: Set<string>
   onToggleDir: (path: string, hasChildren: boolean) => void
-  onOpenFile: (node: FileNode) => void
+  onOpenFile: (node: FileNode, placement?: 'right' | 'default') => void
   expandingPath: string | null
 }
 
@@ -369,7 +378,7 @@ function FileTreeNode({ node, depth, expanded, onToggleDir, onOpenFile, expandin
       <ContextMenu>
         <TouchContextMenuTrigger asChild>{row}</TouchContextMenuTrigger>
         <ContextMenuContent>
-          <ContextMenuItem onSelect={() => onOpenFile(node)}>
+          <ContextMenuItem onSelect={() => onOpenFile(node, 'default')}>
             {t('sidebar.openInTab')}
           </ContextMenuItem>
           <ContextMenuItem onSelect={() => insertIntoChat(`@${node.path}`)}>

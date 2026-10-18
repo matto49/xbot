@@ -1,9 +1,10 @@
 /**
  * useFileSystem — thin API wrappers for the backend FS endpoints (Spec §2.2).
  *
- * Four operations backed by REST:
+ * File operations backed by REST:
  *   listDir(path, showHidden)  → POST /api/fs/list
  *   readFile(path)             → POST /api/fs/read
+ *   writeFile(path, content, version) → POST /api/fs/write
  *   searchFiles(query, path)   → POST /api/fs/search
  *   statFile(path)             → parent listing lookup
  *
@@ -34,6 +35,9 @@ export interface FsReadResult {
   language: string
   size: number
   isBinary: boolean
+  readOnly?: boolean
+  truncated?: boolean
+  version?: string
 }
 
 export interface FsSearchEntry {
@@ -101,8 +105,17 @@ export async function listDir(
   return entries
 }
 
-export async function readFile(path: string, signal?: AbortSignal): Promise<FsReadResult> {
-  return postAPI<FsReadResult>('/api/fs/read', { path }, { signal })
+export interface FileSource { channel: string; chat_id: string }
+
+export async function readFile(path: string, signal?: AbortSignal, source?: FileSource): Promise<FsReadResult> {
+  return postAPI<FsReadResult>('/api/fs/read', { path, ...source }, { signal })
+}
+
+/** Write exactly the loaded file version; conflicts are surfaced to the editor. */
+export async function writeFile(path: string, content: string, expectedVersion: string, source?: FileSource): Promise<{ version: string }> {
+  const result = await postAPI<{ version: string }>('/api/fs/write', { path, content, expectedVersion, ...source })
+  invalidateFsCache()
+  return result
 }
 
 export async function searchFiles(
@@ -145,8 +158,8 @@ export function parentPath(path: string): string {
 }
 
 /** Fetch an image file as a blob URL (for ImagePreview). */
-export async function fetchImageBlobUrl(path: string): Promise<string> {
-  const res = await postRawAPI('/api/fs/read', { path, raw: true })
+export async function fetchImageBlobUrl(path: string, source?: FileSource): Promise<string> {
+  const res = await postRawAPI('/api/fs/read', { path, raw: true, ...source })
   const blob = await res.blob()
   return URL.createObjectURL(blob)
 }

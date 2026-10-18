@@ -58,6 +58,7 @@ import { useTabManager } from '@/hooks/useTabManager'
 import { useTheme } from '@/hooks/useTheme'
 import { useWSConnection } from '@/providers/WSProvider'
 import { useTerminal } from '@/hooks/useTerminal'
+import { hasUnsavedFileDraft } from '@/hooks/useFileDraft'
 import { closeMobileWorkView, pushMobileWorkView, useMobileWorkView, type MobileWorkView } from '@/workspace/mobileWorkView'
 import { cn } from '@/lib/utils'
 import type { SidebarPanel } from '@/components/sidebar/RightSidebar'
@@ -158,6 +159,8 @@ export function MobileAppShell() {
           initialHighlight?: { startLine: number; endLine?: number }
           fileLanguage?: string
           fileViewMode?: 'editor' | 'preview'
+          sourceChannel?: string
+          sourceChatID?: string
         }
         pushMobileWorkView({
           kind: 'file',
@@ -168,6 +171,8 @@ export function MobileAppShell() {
           initialHighlight: d.initialHighlight,
           fileLanguage: d.fileLanguage,
           fileViewMode: d.fileViewMode,
+          sourceChannel: d.sourceChannel,
+          sourceChatID: d.sourceChatID,
         })
         return ''
       }
@@ -339,7 +344,13 @@ export function MobileAppShell() {
   // agent 视图 → ☰ 打开会话抽屉。
   const handleHeaderNav = () => {
     if (view === 'work') {
-      // 工作视图 → 关闭并回到工具页（大多数工作视图从工具页/插件面板打开）。
+      // Keep dirty drafts in memory, but make closing an explicit decision.
+      if (workView?.kind === 'file') {
+        const source = workView.sourceChannel && workView.sourceChatID
+          ? { channel: workView.sourceChannel, chat_id: workView.sourceChatID }
+          : undefined
+        if (hasUnsavedFileDraft(workView.filePath, source) && !window.confirm(t('file.closeUnsaved'))) return
+      }
       closeMobileWorkView()
       setView('detail')
     } else if (view === 'terminal') {
@@ -413,6 +424,8 @@ export function MobileAppShell() {
                         initialHighlight: workView.initialHighlight,
                         fileLanguage: workView.fileLanguage,
                         fileViewMode: workView.fileViewMode,
+                        sourceChannel: workView.sourceChannel,
+                        sourceChatID: workView.sourceChatID,
                       }}
                       api={{} as PanelProps['api']}
                       containerApi={{} as PanelProps['containerApi']}

@@ -313,3 +313,153 @@ describe('openTab: 认领未绑定会话的占位 agent tab', () => {
     expect(panels.map((p) => p.params.sessionId)).toEqual(['chat-1', 'chat-2'])
   })
 })
+describe('explicit right-side file opening', () => {
+  function setup() {
+    type Group = { id: string }
+    type Move = { group: Group; position: string }
+    type Addition = { id: string; params: Record<string, unknown>; position?: { referencePanel: string; direction: string }; renderer?: string }
+    type Panel = { id: string; params: Record<string, unknown>; group: Group; api: { setActive: () => void; moveTo: (options: Move) => void; close?: () => void } }
+    const panels: Panel[] = []
+    const additions: Addition[] = []
+    const moves: Move[] = []
+    const api = {
+      panels, activePanel: undefined as Panel | undefined,
+      onDidAddPanel: () => ({ dispose() {} }),
+      onDidRemovePanel: () => ({ dispose() {} }),
+      onDidActivePanelChange: () => ({ dispose() {} }),
+      getPanel: (id: string | undefined) => panels.find(p => p.id === id),
+      addPanel(opts: Addition) {
+        additions.push(opts)
+        const reference = api.getPanel(opts.position?.referencePanel)
+        const panel: Panel = { id: opts.id, params: opts.params,
+          group: opts.position?.direction === 'within' ? reference!.group : { id: opts.id },
+          api: { setActive() { api.activePanel = panel }, moveTo(opts: Move) {
+            moves.push(opts)
+            panel.group = opts.position === 'right' ? { id: panel.id + '-right' } : opts.group
+          } },
+        }
+        panels.push(panel)
+        return panel
+      },
+    }
+    const hook = renderHook(() => useTabManager())
+    act(() => hook.result.current.bindApi(api as never))
+    const open = (path: string, side = true, source?: { sourceChannel: string; sourceChatID: string }) => {
+      let id = ''
+      act(() => { id = hook.result.current.openTab({ type: 'file', title: path, closable: true, data: { filePath: path, ...source } }, side ? { position: 'right' } : undefined) })
+      return id
+    }
+    act(() => hook.result.current.openTab({ type: 'agent', title: 'Chat', closable: false }))
+    return { ...hook, api, panels, additions, moves, open }
+  }
+
+  it('creates a right group anchored to chat, then reuses it even after chat refocus', () => {
+    const { api, panels, additions, open } = setup()
+    open('/a')
+    expect(additions[1].position).toEqual({ referencePanel: panels[0].id, direction: 'right' })
+    api.activePanel = panels[0]
+    open('/b')
+    expect(additions[2].position).toEqual({ referencePanel: panels[1].id, direction: 'within' })
+    expect(panels[1].group).not.toBe(panels[0].group)
+    expect(panels[2].group).toBe(panels[1].group)
+    expect(additions[0].renderer).toBe('always')
+  })
+
+  it('moves an existing same-group file without recreating or duplicating its editor', () => {
+    const { panels, moves, open } = setup()
+    const id = open('/a', false)
+    expect(panels[1].group).toBe(panels[0].group)
+    expect(open('/a')).toBe(id)
+    expect(panels).toHaveLength(2)
+    expect(moves).toEqual([{ group: panels[0].group, position: 'right' }])
+    open('/a')
+    expect(moves).toHaveLength(1)
+  })
+
+  it('retains dedup and focus indexes when an unsaved-file close is canceled', () => {
+    const { result, api, panels, open } = setup()
+    const id = open('/dirty')
+    const original = panels[1]
+    let closeAttempts = 0
+    // FilePanel's close guard returns without removal when confirmation is canceled.
+    original.api.close = () => { closeAttempts++ }
+    act(() => result.current.closeTab(id))
+    expect(closeAttempts).toBe(1)
+    expect(panels).toHaveLength(2)
+
+    api.activePanel = panels[0]
+    act(() => result.current.setActiveTab(id))
+    expect(api.activePanel).toBe(original)
+
+    api.activePanel = panels[0]
+    expect(open('/dirty')).toBe(id)
+    expect(panels).toHaveLength(2)
+    expect(api.activePanel).toBe(original)
+  })
+
+  it('binds source identity into params and resynced Tab.data, isolating identical paths across sources', () => {
+    const { result, api, panels, open } = setup()
+    const a = { sourceChannel: 'web', sourceChatID: 'chat-a' }
+    const b = { sourceChannel: 'cli', sourceChatID: 'chat-b' }
+    const first = open('/same', true, a)
+    expect(open('/same', true, a)).toBe(first)
+    expect(open('/same', true, b)).not.toBe(first)
+    expect(panels).toHaveLength(3)
+    expect(panels[1].params).toMatchObject(a)
+    expect(panels[2].params).toMatchObject(b)
+    act(() => result.current.bindApi(api as never))
+    expect(result.current.tabs.find(tab => tab.id === first)?.data).toMatchObject(a)
+    expect(open('/same', false)).not.toBe(first)
+    expect(panels).toHaveLength(4)
+  })
+
+  it('default openTab still opens within the active group', () => {
+    const { additions, panels, open } = setup()
+    open('/a', false)
+    expect(additions[1].position).toEqual({ referencePanel: panels[0].id, direction: 'within' })
+  })
+
+
+  it('moves an old sibling into the existing side group and retains the group when its first file closes', () => {
+    const { api, panels, moves, additions, open } = setup()
+    open('/old', false)
+    api.activePanel = panels[0]
+    open('/a')
+    const rightGroup = panels[2].group
+    open('/old')
+    expect(moves.at(-1)).toEqual({ group: rightGroup, position: 'center' })
+    panels.splice(2, 1)
+    api.activePanel = panels[0]
+    open('/b')
+    expect(additions.at(-1)?.position).toEqual({ referencePanel: panels[1].id, direction: 'within' })
+    expect(panels.at(-1)?.group).toBe(rightGroup)
+  })
+
+  it('does not mistake an unrelated active work tab for the chat anchor', () => {
+    const { panels, additions, open } = setup()
+    open('/ordinary', false)
+    open('/side')
+    expect(additions[2].position).toEqual({ referencePanel: panels[0].id, direction: 'right' })
+  })
+
+  it('keeps explicit placement when requests are queued before Dockview binds', () => {
+    const { result } = renderHook(() => useTabManager())
+    act(() => result.current.openTab({ type: 'file', title: 'queued', closable: true, data: { filePath: '/queued' } }, { position: 'right' }))
+    const other = setup()
+    act(() => result.current.bindApi(other.api as never))
+    expect(other.additions.at(-1)?.position).toEqual({ referencePanel: other.panels[0].id, direction: 'right' })
+  })
+})
+
+
+describe('source-scoped file logical keys', () => {
+  it('preserves legacy file keys and uses unambiguous source tuples', () => {
+    expect(tabLogicalKey({ type: 'file', data: { filePath: '/a' } })).toBe('file:/a')
+    const data = { filePath: '/a', sourceChannel: 'web', sourceChatID: 'chat:1' }
+    const key = tabLogicalKey({ type: 'file', data })
+    expect(key).not.toBe('file:/a')
+    expect(key).toBe(tabLogicalKeyFromParams({ ...data, type: 'file' } as never))
+    expect(key).not.toBe(tabLogicalKey({ type: 'file', data: { ...data, sourceChannel: 'cli' } }))
+    expect(key).not.toBe(tabLogicalKey({ type: 'file', data: { ...data, sourceChatID: 'chat:2' } }))
+  })
+})

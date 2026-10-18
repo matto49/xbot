@@ -463,14 +463,20 @@ func (wc *WebChannel) handleFsListPOST(w http.ResponseWriter, r *http.Request) {
 
 func (wc *WebChannel) handleFsReadPOST(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Path string `json:"path"`
-		Raw  bool   `json:"raw,omitempty"`
+		Path    string `json:"path"`
+		Raw     bool   `json:"raw,omitempty"`
+		Channel string `json:"channel,omitempty"`
+		ChatID  string `json:"chat_id,omitempty"`
 	}
 	if err := decodeJSONBody(r, &body, false); err != nil {
 		jsonErrorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	query := url.Values{"path": []string{body.Path}}
+	query := url.Values{
+		"path":    []string{body.Path},
+		"channel": []string{body.Channel},
+		"chat_id": []string{body.ChatID},
+	}
 	legacy := legacyRequest(r, http.MethodGet, query, nil)
 	if body.Raw {
 		wc.handleFsRaw(w, legacy)

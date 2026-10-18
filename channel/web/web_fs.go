@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"xbot/tools"
 )
@@ -229,11 +229,14 @@ func (wc *WebChannel) handleFsList(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type fsReadResponse struct {
-	Content  string `json:"content"`
-	Language string `json:"language"`
-	Size     int64  `json:"size"`
-	IsBinary bool   `json:"isBinary"`
-	Encoding string `json:"encoding,omitempty"`
+	Version   string `json:"version,omitempty"`
+	ReadOnly  bool   `json:"readOnly"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Content   string `json:"content"`
+	Language  string `json:"language"`
+	Size      int64  `json:"size"`
+	IsBinary  bool   `json:"isBinary"`
+	Encoding  string `json:"encoding,omitempty"`
 }
 
 // isBinaryData checks if the given bytes contain NUL bytes (binary indicator).
@@ -280,6 +283,7 @@ func (wc *WebChannel) handleFsRead(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, fsReadResponse{
+			ReadOnly: true,
 			Content:  string(data),
 			Language: languageFromPath(parts[1]),
 			Size:     int64(len(data)),
@@ -288,6 +292,9 @@ func (wc *WebChannel) handleFsRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !wc.fsLocalAccess(w, r, r.URL.Query().Get("channel"), r.URL.Query().Get("chat_id")) {
+		return
+	}
 	safePath, err := resolveSafePath(rawPath)
 	if err != nil {
 		jsonErrorResponse(w, http.StatusForbidden, err.Error())
@@ -312,72 +319,41 @@ func (wc *WebChannel) handleFsRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Open and sniff first N bytes for binary detection.
+	// Only regular files can provide a finite editable document (never open a FIFO).
+	if !info.Mode().IsRegular() {
+		jsonErrorResponse(w, http.StatusBadRequest, "path is not a regular file")
+		return
+	}
 	f, err := os.Open(safePath)
 	if err != nil {
-		if os.IsPermission(err) {
-			jsonErrorResponse(w, http.StatusForbidden, "permission denied")
-			return
-		}
-		jsonErrorResponse(w, http.StatusInternalServerError, err.Error())
+		fsSaveIOError(w, err)
 		return
 	}
 	defer f.Close()
-
-	sniff := make([]byte, binarySniffSize)
-	n, err := f.Read(sniff)
-	if err != nil && err != io.EOF {
-		jsonErrorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	sniff = sniff[:n]
-
-	if isBinaryData(sniff) {
-		content, readErr := io.ReadAll(io.LimitReader(io.MultiReader(bytes.NewReader(sniff), f), maxFileReadSize))
-		if readErr != nil {
-			jsonErrorResponse(w, http.StatusInternalServerError, readErr.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, fsReadResponse{
-			Content:  base64.StdEncoding.EncodeToString(content),
-			Language: "",
-			Size:     info.Size(),
-			IsBinary: true,
-			Encoding: "base64",
-		})
-		return
-	}
-
-	// Read full content (max 2MB).
-	if info.Size() > maxFileReadSize {
-		// File is text but too large — return truncated content with a note.
-		content := make([]byte, maxFileReadSize)
-		copy(content, sniff)
-		remaining := make([]byte, maxFileReadSize-n)
-		rn, _ := f.Read(remaining)
-		copy(content[n:], remaining[:rn])
-		writeJSON(w, http.StatusOK, fsReadResponse{
-			Content:  string(content[:n+rn]),
-			Language: languageFromPath(safePath),
-			Size:     info.Size(),
-			IsBinary: false,
-		})
-		return
-	}
-
-	// Read entire file.
-	content, err := io.ReadAll(io.MultiReader(bytes.NewReader(sniff), f))
+	content, err := io.ReadAll(io.LimitReader(f, maxFileReadSize+1))
 	if err != nil {
 		jsonErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	writeJSON(w, http.StatusOK, fsReadResponse{
-		Content:  string(content),
-		Language: languageFromPath(safePath),
-		Size:     info.Size(),
-		IsBinary: false,
-	})
+	truncated := len(content) > maxFileReadSize || info.Size() > maxFileReadSize
+	if len(content) > maxFileReadSize {
+		content = content[:maxFileReadSize]
+	}
+	binary := isBinaryData(content)
+	editable := !truncated && !binary && utf8.Valid(content)
+	result := fsReadResponse{
+		Content: string(content), Language: languageFromPath(safePath), Size: info.Size(),
+		IsBinary: binary, ReadOnly: !editable || info.Mode().Perm()&0222 == 0, Truncated: truncated,
+	}
+	if binary {
+		result.Content = base64.StdEncoding.EncodeToString(content)
+		result.Encoding = "base64"
+		result.Language = ""
+	}
+	if editable {
+		result.Version = fsContentVersion(content)
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // handleFsRaw serves the raw content of a file (for images, etc).
@@ -398,6 +374,11 @@ func (wc *WebChannel) handleFsRaw(w http.ResponseWriter, r *http.Request) {
 	rawPath := r.URL.Query().Get("path")
 	if rawPath == "" {
 		jsonErrorResponse(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	// Raw previews use the same execution-target boundary as complete reads.
+	if !wc.fsLocalAccess(w, r, r.URL.Query().Get("channel"), r.URL.Query().Get("chat_id")) {
 		return
 	}
 

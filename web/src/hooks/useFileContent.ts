@@ -1,108 +1,56 @@
-/**
- * useFileContent — file content loader via the REST API.
- *
- * Uses GET /api/fs/read to load file content for the editor/preview
- * components. The file path must be relative to the agent's working
- * directory (CWD), and is joined with CWD to form an absolute path.
- *
- * State shape:
- *   - `content`  — current text (editable; FilePanel writes back via setContent)
- *   - `loading`  — true during the async load
- *   - `setContent` — imperative setter for the editor's onChange path
- *   - `imageUrl` — blob URL for image files (null for non-images)
- */
-import { useCallback, useEffect, useState } from 'react'
-
+import { useEffect, useRef, useState } from 'react'
 import { isImageFile } from '@/components/file/fileTypes'
 import type { WSConnection } from '@/types/ws'
-import { readFile, joinPath, fetchImageBlobUrl } from '@/hooks/useFileSystem'
-
-export interface UseFileContentResult {
-  content: string
-  loading: boolean
-  error: string | null
-  setContent: (next: string) => void
-  imageUrl: string | null
-}
+import { joinPath, fetchImageBlobUrl, type FileSource } from './useFileSystem'
+import { useFileDraft } from './useFileDraft'
 
 interface UseFileContentOptions {
   filePath: string
-  /** The WS connection (injected from DockviewContext for isolated roots). */
   ws: WSConnection
-  /** Current working directory (injected from DockviewContext). */
   cwd: string | null
+  source?: FileSource
 }
 
-export function useFileContent({ filePath, cwd }: UseFileContentOptions): UseFileContentResult {
-  const [content, setContent] = useState('')
-  const [imageUrl, setImageUrl] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
+/** Resolve once per opened file, never retarget an editor when the session CWD changes. */
+export function useFileContent({ filePath, cwd, source }: UseFileContentOptions) {
+  const binding = useRef<{ filePath: string; path: string | null; source?: FileSource }>({ filePath: '', path: null })
+  if (binding.current.filePath !== filePath || binding.current.source?.channel !== source?.channel || binding.current.source?.chat_id !== source?.chat_id) binding.current = { filePath, path: null, source }
+  if (!binding.current.path && filePath) {
+    if (filePath.startsWith('/') || filePath.startsWith('embedded:')) binding.current.path = filePath
+    else if (cwd) binding.current.path = joinPath(cwd, filePath)
+  }
+  const absolutePath = binding.current.path
+  const image = isImageFile(filePath)
+  const draft = useFileDraft(image ? null : absolutePath, binding.current.source)
+  const boundSource = binding.current.source
+  const sourceChannel = boundSource?.channel
+  const sourceChatID = boundSource?.chat_id
+  const imageKey = JSON.stringify([absolutePath, sourceChannel, sourceChatID])
+  const [imageState, setImageState] = useState<{ key: string; url: string | null; error: string | null } | null>(null)
   useEffect(() => {
+    if (!image || !absolutePath) return
     let cancelled = false
-
-    // Embedded skill paths (e.g. "embedded:debug/SKILL.md") are virtual —
-    // served by the backend, no CWD joining needed.
-    const isEmbedded = filePath.startsWith('embedded:')
-    if (!filePath || (!cwd && !isEmbedded)) {
-      setLoading(false)
-      setError(null)
-      return
-    }
-
-    // Resolve absolute path: absolute or embedded paths pass through; relative joined with CWD
-    const absPath = filePath.startsWith('/') || isEmbedded ? filePath : joinPath(cwd!, filePath)
-
-    // Image files: load as blob URL instead of text
-    if (isImageFile(filePath)) {
-      setLoading(true)
-      setError(null)
-      fetchImageBlobUrl(absPath)
-        .then((url) => {
-          if (cancelled) return
-          setImageUrl(url)
-          setContent('')
-          setLoading(false)
-        })
-        .catch((e) => {
-          if (cancelled) return
-          setError(e instanceof Error ? e.message : String(e))
-          setContent('')
-          setLoading(false)
-        })
-      return () => {
-        cancelled = true
-      }
-    }
-
-    setLoading(true)
-    setError(null)
-    readFile(absPath)
-      .then((res) => {
-        if (cancelled) return
-        if (res.isBinary) {
-          setError('Binary file')
-          setContent('')
-        } else {
-          setContent(res.content)
-        }
-      })
-      .catch((e) => {
-        if (cancelled) return
-        setError(e instanceof Error ? e.message : String(e))
-        setContent('')
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-
+    let objectUrl: string | null = null
+    void fetchImageBlobUrl(absolutePath, sourceChannel && sourceChatID ? { channel: sourceChannel, chat_id: sourceChatID } : undefined).then(url => {
+      objectUrl = url
+      if (cancelled) URL.revokeObjectURL(url)
+      else setImageState({ key: imageKey, url, error: null })
+    }, (error: unknown) => {
+      if (!cancelled) setImageState({ key: imageKey, url: null, error: error instanceof Error ? error.message : String(error) })
+    })
     return () => {
       cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [filePath, cwd])
-
-  const setContentFn = useCallback((next: string) => setContent(next), [])
-
-  return { content, loading, error, setContent: setContentFn, imageUrl }
+  }, [image, absolutePath, imageKey, sourceChannel, sourceChatID])
+  const loadedImage = imageState?.key === imageKey ? imageState : null
+  return {
+    ...draft,
+    absolutePath,
+    loading: !absolutePath || (image ? !loadedImage : draft.loading),
+    error: image ? loadedImage?.error ?? null : draft.error,
+    imageUrl: image ? loadedImage?.url ?? null : null,
+  }
 }
+
+export type UseFileContentResult = ReturnType<typeof useFileContent>

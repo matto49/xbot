@@ -10,6 +10,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Search, X } from 'lucide-react'
 
 import { useI18n } from '@/providers/i18n'
+import { useSessionStore } from '@/hooks/useSessionStore'
+import { parentSessionForFocusedAgent } from './session-scope'
 import { useFileTree } from '@/hooks/useFileTree'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -25,6 +27,8 @@ const DEBOUNCE_MS = 200
 
 export function FileSearch({ tabManager }: FileSearchProps) {
   const { t } = useI18n()
+  const session = useSessionStore()
+  const sourceSession = parentSessionForFocusedAgent(tabManager, session.activeSession)
   const { flatFiles } = useFileTree()
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
@@ -57,10 +61,10 @@ export function FileSearch({ tabManager }: FileSearchProps) {
         title: node.name,
         icon: 'file',
         closable: true,
-        data: { filePath: node.path, language: node.language },
-      })
+        data: { filePath: node.path, fileLanguage: node.language, sourceChannel: sourceSession?.channel, sourceChatID: sourceSession?.chatID },
+      }, { position: 'right' })
     },
-    [tabManager],
+    [tabManager, sourceSession?.channel, sourceSession?.chatID],
   )
 
   return (

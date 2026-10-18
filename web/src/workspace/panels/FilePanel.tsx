@@ -7,8 +7,8 @@
  *   - Image (.png/.jpg/.gif/.webp/.svg) → image preview, no toggle.
  *   - Everything else → Monaco editor, no toggle (only markdown is previewable).
  *
- * Content is loaded via the `read_file` WS RPC (through useFileContent).
- * Edits live in component state and are not persisted.
+ * Content and version are loaded through REST. Drafts survive panel unmounts;
+ * explicit saves use optimistic concurrency against the loaded version.
  *
  * 插件控制：params.editorId 存在时挂载 EditorController 到 editorRegistry
  * （plugin-runtime/editorRegistry.ts）——ctx.ui.openFileTab 返回的 EditorHandle
@@ -31,7 +31,7 @@ import {
   type FileViewMode,
 } from '@/components/file/fileTypes'
 import { useFileContent } from '@/hooks/useFileContent'
-import { joinPath, parentPath } from '@/hooks/useFileSystem'
+import { parentPath } from '@/hooks/useFileSystem'
 import { useI18n } from '@/providers/i18n'
 import { attachEditor } from '@/plugin-runtime/editorRegistry'
 import { useDockviewContext } from '@/workspace/types'
@@ -45,7 +45,7 @@ function baseName(filePath?: string): string {
 }
 
 export function FilePanel({ params, api }: PanelProps) {
-  const { ws, cwd } = useDockviewContext()
+  const { ws, cwd, sessionStore } = useDockviewContext()
   const filePath = params.filePath ?? ''
   const fileName = useMemo(() => baseName(filePath), [filePath])
   const isImage = isImageFile(fileName)
@@ -55,7 +55,27 @@ export function FilePanel({ params, api }: PanelProps) {
   const [languageOverride, setLanguageOverride] = useState(params.fileLanguage)
   const language = languageOverride ?? languageOf(fileName)
 
-  const { content, loading, error, setContent, imageUrl } = useFileContent({ filePath, ws, cwd: cwd.cwd })
+  const initialSession = useRef(sessionStore?.activeSession)
+  const source = params.sourceChannel && params.sourceChatID
+    ? { channel: params.sourceChannel, chat_id: params.sourceChatID }
+    : initialSession.current ? { channel: initialSession.current.channel, chat_id: initialSession.current.chatID } : undefined
+  const { content, loading, error, setContent, imageUrl, absolutePath, dirty, saving, saveError, readOnly, save, reload } = useFileContent({ filePath, ws, cwd: cwd.cwd, source })
+  const { t } = useI18n()
+  const closeState = useRef({ dirty, saving })
+  closeState.current = { dirty, saving }
+  // Dockview 7 exposes no cancellable before-remove event. Tab UI and plugin
+  // handles both use the public panel close API; direct removePanel must be
+  // guarded by its layout owner. Drafts survive either path in the draft store.
+  useEffect(() => {
+    if (typeof api?.close !== 'function') return
+    const close = api.close
+    const guardedClose = () => {
+      if ((closeState.current.dirty || closeState.current.saving) && !window.confirm(t('file.closeUnsaved'))) return
+      close.call(api)
+    }
+    api.close = guardedClose
+    return () => { if (api.close === guardedClose) api.close = close }
+  }, [api, t])
   const [mode, setMode] = useState<FileViewMode>(
     () => params.fileViewMode ?? defaultViewMode(fileName),
   )
@@ -76,9 +96,8 @@ export function FilePanel({ params, api }: PanelProps) {
       const idx = filePath.lastIndexOf('/')
       return idx > 0 ? filePath.slice(0, idx) : filePath
     }
-    const absPath = filePath.startsWith('/') ? filePath : (cwd.cwd ? joinPath(cwd.cwd, filePath) : filePath)
-    return parentPath(absPath)
-  }, [filePath, cwd.cwd])
+    return absolutePath ? parentPath(absolutePath) : undefined
+  }, [filePath, absolutePath])
 
   // Re-seed the view mode if the file ever changes (dockview reuses a panel
   // instance when its params update). Image files ignore `mode` entirely.
@@ -187,11 +206,25 @@ export function FilePanel({ params, api }: PanelProps) {
   }
 
   return (
-    <div className="flex h-full flex-col bg-bg-primary">
+    <div className="flex h-full flex-col bg-bg-primary" tabIndex={-1} onKeyDownCapture={(event) => {
+      if (event.key.toLowerCase() === 's' && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+        event.preventDefault()
+        event.stopPropagation()
+        void save()
+      }
+    }}>
       <FileToolbar
         fileName={fileName}
         mode={mode}
         onModeChange={canToggle ? setMode : undefined}
+        dirty={dirty}
+        saving={saving}
+        readOnly={readOnly || loading || !!error}
+        saveError={saveError}
+        onSave={() => { void save() }}
+        onReload={() => {
+          if (!dirty || window.confirm(t('file.discardChanges'))) reload?.()
+        }}
         canToggle={canToggle}
       />
       <div className="min-h-0 flex-1">
@@ -215,6 +248,7 @@ export function FilePanel({ params, api }: PanelProps) {
         ) : (
           <MonacoEditor
             value={content}
+            readOnly={readOnly || loading || !!error}
             language={language}
             onChange={setContent}
             onEditorMount={(ed, monaco) => {

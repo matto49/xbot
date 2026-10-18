@@ -406,9 +406,9 @@ func (wc *WebChannel) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// Uploads enforce their own limits in their handlers:
 		// /api/files/upload (10MB) and /api/plugin-files/upload (no limit —
 		// plugin/wallpaper upload; handler reads multipart to disk, no
-		// body cap). Both must bypass the 1MB middleware limit — wallpaper
-		// and plugin files routinely exceed 1MB.
-		if r.Method != http.MethodGet && r.URL.Path != "/api/files/upload" && r.URL.Path != "/api/plugin-files/upload" {
+		// body cap). File saves also enforce their own bounded JSON/text
+		// limits, so a complete 2 MiB text file remains round-trippable.
+		if r.Method != http.MethodGet && r.URL.Path != "/api/files/upload" && r.URL.Path != "/api/plugin-files/upload" && r.URL.Path != "/api/fs/write" {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 		}
 		si := wc.validateSession(r)
